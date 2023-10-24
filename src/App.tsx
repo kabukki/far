@@ -1,6 +1,6 @@
 import clsx from 'clsx';
+import { ChangeEvent, KeyboardEvent, useLayoutEffect, useMemo, useRef, useState, } from 'react';
 import { eachDayOfInterval, eachMonthOfInterval, endOfMonth, endOfYear, isSameDay, setMonth, startOfMonth, startOfYear } from 'date-fns';
-import { ChangeEvent, useMemo, useState } from 'react';
 
 import { formatDate, getCurrencyName, getCurrencySymbol } from './utils';
 import { usePersistentState } from './hooks';
@@ -22,7 +22,9 @@ export function App () {
   const [currency, setCurrency] = usePersistentState('currency', 'EUR');
   const [withTaxes, setWithTaxes] = usePersistentState('taxes', false);
   const [current, setCurrent] = useState(() => startOfMonth(new Date()));
-
+  const [focusFilter, setFocusFilter] = useState(null);
+  const focusRefs = useRef(new Map());
+  
   const range = useMemo(() => eachMonthOfInterval({ start: startOfYear(new Date()), end: endOfYear(new Date()) }), []);
   const activities = useMemo(() => {
     const newActivites = eachDayOfInterval({ start: startOfMonth(current), end: endOfMonth(current) }).map((date) => ({ date, scopes: [] }) as Activity);
@@ -56,7 +58,7 @@ export function App () {
     }
 
     return acc;
-  }, [] as Scope[]).sort((a, b) => a.name.localeCompare(b.name));
+  }, [] as Scope[]).sort((a, b) => b.time - a.time || a.name.localeCompare(b.name));
 
   const total = activities.reduce((totals, activity) => totals + activity.scopes.reduce((total, { time }) => total + time, 0), 0);
 
@@ -77,14 +79,34 @@ export function App () {
 
       if (!scope) {
         scope = {
-          name: 'x',
+          name: '',
           time: 1,
           content: [],
         };
         activity.scopes.push(scope);
+        setFocusFilter(`${filter.day.toISOString()}-${0}`);
       }
 
       scope.content.push('');
+
+      return copy;
+    });
+  };
+
+  const onCreateScope = (filter: {
+    day: Date
+  }) => () => {
+    setData((previous) => {
+      const copy = previous.slice();
+      const activity = copy.find(({ date }) => isSameDay(new Date(date), filter.day));
+      
+      if (activity) {
+        activity.scopes.push({
+          name: 'x',
+          time: 1,
+          content: [''],
+        });
+      }
 
       return copy;
     });
@@ -115,7 +137,6 @@ export function App () {
       return copy;
     });
   };
-
 
   const onUpdateScopeTime = (filter: {
     day: Date
@@ -157,7 +178,6 @@ export function App () {
     });
   };
 
-
   const onUpdateScopeContent = (filter: {
     day: Date
     scope: Scope['name']
@@ -178,6 +198,54 @@ export function App () {
       return copy;
     });
   };
+
+  const onKeydownScopeContent = (filter: {
+    day: Date
+    scope: Scope['name']
+    content: number
+  }) => (e: KeyboardEvent<HTMLSpanElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const selection = window.getSelection();
+
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        const text = range.startContainer.textContent ?? '';
+        const [before, after] = [text.slice(0, range.startOffset), text.slice(range.startOffset)];
+        console.log(before, after);
+
+        // onCreateActivity
+        setData((previous) => {
+          const copy = previous.slice();
+          const activity = copy.find(({ date }) => isSameDay(new Date(date), filter.day));
+          
+          if (activity) {
+            const scope = activity.scopes.find(({ name }) => name === filter.scope);
+    
+            if (scope) {
+              scope.content[filter.content] = before;
+              scope.content.splice(filter.content + 1, 0, after);
+              setFocusFilter(`${filter.day.toISOString()}-${filter.scope}-${filter.content + 1}`);
+            }
+          }
+    
+          return copy;    
+        });
+      }
+    } else if (e.key === 'Backspace') {
+      // onDeleteActivity(filter)();
+    }
+  };
+
+  useLayoutEffect(() => {
+    if (focusFilter) {
+      const element = focusRefs.current.get(focusFilter);
+      
+      if (element) {
+        element.focus();
+      }
+    }
+  }, [focusFilter]);
 
   return (
     <main className="p-8 space-y-8 container mx-auto">
@@ -229,9 +297,10 @@ export function App () {
               activity.scopes.map((scope, m) => (
                 <tr key={`${activity.date.toISOString()}-${m}`} className={clsx('divide-x', n % 2 === 0 ? 'bg-white' : 'bg-gray-100')}>
                   {m === 0 && <td className="p-1 text-center" rowSpan={activity.scopes.length}>{formatDate(activity.date)}</td>}
-                  <td className="p-1">
+                  <td className="relative p-1 group">
                     <div className="flex items-center justify-between">
                       <span
+                        ref={(e) => { focusRefs.current.set(`${activity.date.toISOString()}-${m}`, e)}}
                         className="outline-none"
                         contentEditable
                         suppressContentEditableWarning
@@ -246,29 +315,32 @@ export function App () {
                         onChange={onUpdateScopeTime({ day: activity.date, scope: scope.name })}
                       />
                     </div>
+                    <button
+                      className="z-10 absolute inset-x-1/2 -translate-x-1/2 bottom-0 translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-lime-600 text-white text-2xl shadow cursor-pointer opacity-0 transition group-hover:opacity-100"
+                      onClick={onCreateScope({ day: activity.date })}
+                    >﹢</button>
                   </td>
                   <td className="relative p-1 group">
                     <ul>
                       {scope.content.map((entry, n) => (
-                        <li key={n} className="group/li">
-                          ・
-                          <span
-                            className="outline-none"
-                            contentEditable
-                            suppressContentEditableWarning
-                            onInput={onUpdateScopeContent({ day: activity.date, scope: scope.name, content: n })}
-                          >{entry}</span>
+                        // Reverse order is used because of peer targeting limitations
+                        <li key={n} className="group/li flex flex-row-reverse gap-1">
                           <button
-                            className="ml-2 text-red-800 opacity-0 transition group-hover/li:opacity-100"
+                            className="self-center text-red-800 opacity-0 transition group-hover/li:opacity-100"
                             onClick={onDeleteActivity({ day: activity.date, scope: scope.name, content: n })}
                           >&times;</button>
+                          <span
+                            ref={(e) => { focusRefs.current.set(`${activity.date.toISOString()}-${scope.name}-${n}`, e)}}
+                            className="peer flex-1 cursor-text outline-none "
+                            contentEditable
+                            suppressContentEditableWarning
+                            onKeyDown={onKeydownScopeContent({ day: activity.date, scope: scope.name, content: n })}
+                            onInput={onUpdateScopeContent({ day: activity.date, scope: scope.name, content: n })}
+                          >{entry}</span>
+                          <span className="transition peer-focus:text-lime-600 peer-focus:animate-pulse">・</span>
                         </li>
                       ))}
                     </ul>
-                    <button
-                      className="z-10 absolute inset-y-1/2 -translate-y-1/2 right-0 translate-x-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-lime-600 text-white text-2xl shadow cursor-pointer opacity-0 transition group-hover:opacity-100"
-                      onClick={onCreateActivity({ day: activity.date, scope: scope.name })}
-                    >﹢</button>
                   </td>
                 </tr>
               ))
@@ -278,7 +350,7 @@ export function App () {
                 <td className="relative p-1 group" colSpan={2}>
                   <div className="text-center">-</div>
                   <button
-                    className="z-10 absolute inset-y-1/2 -translate-y-1/2 right-0 translate-x-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-lime-600 text-white text-2xl shadow cursor-pointer opacity-0 transition group-hover:opacity-100"
+                    className="z-10 absolute inset-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-lime-600 text-white text-2xl shadow cursor-pointer opacity-0 transition group-hover:opacity-100"
                     onClick={onCreateActivity({ day: activity.date })}
                   >﹢</button>
                 </td>
